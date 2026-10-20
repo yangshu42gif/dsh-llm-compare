@@ -1,25 +1,11 @@
-// dsh-llm-compare v0.3.1: GUI 开关对比模式——打开后每次对话自动并行比对两个 LLM。
-// 开关位于插件设置卡片（volatile config，即时生效），无需特定 query。
-// 关闭开关后恢复单模型正常对话。
-
-import Schema from '@deepseek-ai/schemastery'
+// dsh-llm-compare v0.4.0: 对话内开关对比模式——说「打开对比模式」即可切换。
+// 注册两个工具：
+//   compare_mode: 切换对比模式（on / off / status），切换后 system prompt 即时注入/移除
+//   llm_compare:  并行调用两个 LLM，结果以左右对照表格返回
+// 模型配置仍通过 profile 的 cordis.patch.yml 传入（YAML config）。
 
 export const name = 'dsh-llm-compare'
 export const inject = ['tools', 'systemPrompt']
-
-/* ---------- Config Schema（DSH 据此渲染设置卡片） ---------- */
-
-export const Config = Schema.object({
-  models: Schema.array(Schema.object({
-    label: Schema.string().description('模型显示名称'),
-    baseUrl: Schema.string().description('OpenAI 兼容 API base URL'),
-    apiKey: Schema.string().role('secret').description('API 密钥'),
-    model: Schema.string().description('模型 ID'),
-  })).min(2).max(2).description('要比对的两个模型（左=第一个、右=第二个）'),
-  temperature: Schema.number().default(0.7).description('采样温度'),
-  maxTokens: Schema.number().default(2048).description('单模型最大生成 token'),
-  compareMode: Schema.boolean().default(false).volatile().description('对比模式开关：打开后每次回复自动并行比对两个模型'),
-})
 
 /* ---------- OpenAI 兼容 API 调用 ---------- */
 
@@ -128,13 +114,14 @@ export function apply(ctx, config) {
   const [modelA, modelB] = models
   const temperature = config.temperature ?? 0.7
   const maxTokens = config.maxTokens ?? 2048
-  const compareMode = config.compareMode ?? false
 
-  /* ---------- GUI 开关：system prompt 动态段落 ---------- */
+  /* ---------- 对比模式状态 ---------- */
 
+  let compareEnabled = false
   let promptDisposer = null
 
   const setCompareMode = (enabled) => {
+    compareEnabled = enabled
     if (promptDisposer) { promptDisposer(); promptDisposer = null }
     if (!enabled) return
     promptDisposer = ctx.systemPrompt.section({
@@ -142,25 +129,63 @@ export function apply(ctx, config) {
       order: 1100,
       text: `# 对比模式已开启
 
-每次回答用户问题后，你**必须**调用 llm_compare 工具，把你刚才的回答内容作为 prompt 参数，让另一个模型（${modelB.label}）也回答同一问题。
+每次回答用户问题后，你**必须**调用 llm_compare 工具，把你刚才的回答内容作为 prompt 参数，让两个模型也回答同一问题。
 工具返回后，在回复末尾附上左右对照表格和摘要统计，让用户看到两个模型的差异。
 格式：先正常回答，然后附比对表格。`,
       interpolate: false,
     })
   }
 
-  // 初始状态
-  setCompareMode(compareMode)
-
-  // volatile config 变更时即时切换（GUI 设置卡片保存后触发）
-  ctx.on('loader/volatile-update', () => {
-    const current = config.compareMode?.get?.() ?? config.compareMode ?? false
-    setCompareMode(current)
-  })
-
   ctx.effect(() => () => { if (promptDisposer) promptDisposer() })
 
-  /* ---------- llm_compare 工具注册 ---------- */
+  /* ---------- compare_mode 工具（对话内开关） ---------- */
+
+  ctx.tools.register({
+    name: 'compare_mode',
+    description: `Toggle LLM compare mode on/off. When ON, every answer is automatically compared between ${modelA.label} and ${modelB.label}. Use action 'on' to enable, 'off' to disable, 'status' to check current state. Call this when the user says "打开对比模式", "开启对比", "比对模式", "关闭对比模式", "停止比对" etc.`,
+    parameters: {
+      action: { type: 'string', required: true, description: `'on' to enable compare mode, 'off' to disable, 'status' to check current state` },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          enabled: { type: 'boolean', description: 'Current compare mode state after this call' },
+          message: { type: 'string', description: 'Human-readable status message' },
+        },
+      },
+      render: (_args, value) => {
+        if (!value) return [{ type: 'text', text: 'compare_mode: no result' }]
+        return [{ type: 'text', text: value.message ?? `对比模式: ${value.enabled ? '已开启' : '已关闭'}` }]
+      },
+    },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: `对比模式 · ${args.action === 'on' ? '开启' : args.action === 'off' ? '关闭' : '查询'}`,
+      content: `${modelA.label} vs ${modelB.label}`,
+    }),
+    presentResult: (_args, { content }) => ({
+      card: 'generic',
+      title: `对比模式 · ${content?.enabled ? '已开启' : '已关闭'}`,
+      content: content?.message ?? '',
+    }),
+    async execute(args, _exec) {
+      switch (args.action) {
+        case 'on':
+          setCompareMode(true)
+          return { enabled: true, message: `对比模式已开启：${modelA.label} vs ${modelB.label}。此后每次回答都会自动并行比对两个模型。` }
+        case 'off':
+          setCompareMode(false)
+          return { enabled: false, message: '对比模式已关闭。恢复正常单模型对话。' }
+        case 'status':
+          return { enabled: compareEnabled, message: `对比模式当前${compareEnabled ? '已开启' : '已关闭'}。` }
+        default:
+          return { enabled: compareEnabled, message: `未知操作 "${args.action}"，可用值：on / off / status。` }
+      }
+    },
+  })
+
+  /* ---------- llm_compare 工具（并行比对） ---------- */
 
   ctx.tools.register({
     name: 'llm_compare',
