@@ -1,7 +1,7 @@
-// dsh-llm-compare v0.5.0: 对比模式为纯对话式开关——agent 直接确认，零工具调用。
+// dsh-llm-compare v0.5.1: 对比模式为纯对话式开关，system prompt 始终注入。
 // 「打开对比模式」→ agent 纯文字回复「已开启」→ 后续回答自动调用 llm_compare 比对
 // 「关闭对比模式」→ agent 纯文字回复「已关闭」→ 停止比对
-// system prompt 常驻说明此行为，不需要额外工具切换状态。
+// models 未配置时：system prompt 仍然注入（agent 知道对比模式概念），工具返回配置指引。
 
 export const name = 'dsh-llm-compare'
 export const inject = ['tools', 'systemPrompt']
@@ -105,38 +105,44 @@ function buildSummary(a, b, elapsedMs) {
 
 export function apply(ctx, config) {
   const models = config?.models
-  if (!models || models.length < 2) {
-    ctx.logger?.warn?.('[dsh-llm-compare] 需要配置至少两个模型端点（models 数组），工具未注册。')
-    return
+  const configured = models && models.length >= 2
+
+  const [modelA, modelB] = configured ? models : [
+    { label: 'Model A', baseUrl: '', apiKey: '', model: '' },
+    { label: 'Model B', baseUrl: '', apiKey: '', model: '' },
+  ]
+  const temperature = config?.temperature ?? 0.7
+  const maxTokens = config?.maxTokens ?? 2048
+
+  if (!configured) {
+    ctx.logger?.warn?.('[dsh-llm-compare] models 未配置，llm_compare 工具将返回配置指引。请在 profile 的 cordis.patch.yml 中配置 models 数组。')
   }
 
-  const [modelA, modelB] = models
-  const temperature = config.temperature ?? 0.7
-  const maxTokens = config.maxTokens ?? 2048
-
-  /* ---------- System prompt 常驻说明（对话式开关指令） ---------- */
+  /* ---------- System prompt 常驻说明（始终注入，无论 models 是否配置） ---------- */
 
   ctx.systemPrompt.section({
     name: 'llm-compare-guide',
     order: 1100,
     text: `# LLM 对比模式
 
-你有一个 llm_compare 工具，可以并行调用两个 LLM（${modelA.label} 和 ${modelB.label}）并返回左右对照表格。
+你有一个 llm_compare 工具，可以并行调用两个 LLM${configured ? `（${modelA.label} 和 ${modelB.label}）` : ''}并返回左右对照表格。
 
 **对比模式开关（纯对话，不调用任何工具）：**
-- 当用户说「打开对比模式」「开启对比」「开始比对」等 → 直接回复「好的，对比模式已开启。此后每次回答我都会并行比对两个模型。」**不要调用任何工具**，纯文字确认即可。
+- 当用户说「打开对比模式」「开启对比」「开始比对」等 → 直接回复「好的，对比模式已开启。此后每次回答我都会并行比对两个模型。」**不要调用任何工具，不要搜索文件，不要运行命令**，纯文字确认即可。
 - 开启后，每次回答用户问题的末尾，调用 llm_compare 工具（把你刚才的回答作为 prompt 参数），在回复后附上比对表格。
 - 当用户说「关闭对比模式」「停止比对」「关闭对比」等 → 直接回复「对比模式已关闭。」**不要调用任何工具**，此后停止比对。
-- 用户问「对比模式是什么状态」→ 根据对话上下文判断当前是否在比对，纯文字回复。`,
+- 用户问「对比模式是什么状态」→ 根据对话上下文判断当前是否在比对，纯文字回复。
+
+**重要**：对比模式的开关是纯对话行为，与工作区内容无关。不要试图在工作区中寻找「对比模式」相关文件或配置。`,
     interpolate: false,
   })
 
-  /* ---------- llm_compare 工具（并行比对） ---------- */
+  /* ---------- llm_compare 工具 ---------- */
 
   ctx.tools.register({
     name: 'llm_compare',
     description: [
-      `Send the same prompt to two configured LLMs (${modelA.label} vs ${modelB.label}) in parallel.`,
+      `Send the same prompt to two configured LLMs in parallel.`,
       'Results are returned as a side-by-side comparison table plus summary stats.',
       'When compare mode is active, call this after each answer with your answer as the prompt.',
     ].join(' '),
@@ -171,6 +177,16 @@ export function apply(ctx, config) {
       content: String(content ?? '').slice(0, 200),
     }),
     async execute(args, exec) {
+      if (!configured) {
+        return {
+          comparisonTable: '',
+          summary: 'llm_compare 尚未配置模型端点。请在 profile 的 cordis.patch.yml 中为 dsh-llm-compare 配置 models 数组（两个模型的 baseUrl/apiKey/model），然后重新加载配置。',
+          modelA: { label: '未配置', text: '', latencyMs: 0, tokens: '' },
+          modelB: { label: '未配置', text: '', latencyMs: 0, tokens: '' },
+          elapsedMs: 0,
+        }
+      }
+
       const start = Date.now()
       const options = { temperature, maxTokens }
       const [resultA, resultB] = await Promise.allSettled([
