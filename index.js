@@ -1,8 +1,9 @@
-// dsh-llm-compare v0.2.0: 在一次对话里并行调用两个 LLM，结果以左右对照表格直接呈现。
-// 改进：不再需要手动打开 Sidebar 文件——对话内即可看到并排比对 + 摘要统计。
+// dsh-llm-compare v0.3.0: GUI 开关对比模式——打开后每次对话自动并行比对两个 LLM。
+// 开关位于插件设置卡片（volatile config，即时生效），无需特定 query。
+// 关闭开关后恢复单模型正常对话。
 
 export const name = 'dsh-llm-compare'
-export const inject = ['tools']
+export const inject = ['tools', 'systemPrompt']
 
 /* ---------- OpenAI 兼容 API 调用 ---------- */
 
@@ -35,16 +36,12 @@ async function callModel(config, prompt, options, signal) {
     ? { input: data.usage.prompt_tokens, output: data.usage.completion_tokens }
     : { input: 0, output: 0 }
   return {
-    label: config.label,
-    model: config.model,
-    text,
-    usage,
-    latencyMs: Date.now() - start,
-    error: null,
+    label: config.label, model: config.model, text, usage,
+    latencyMs: Date.now() - start, error: null,
   }
 }
 
-/* ---------- 工作区文件写入（可选，供 Sidebar 分栏） ---------- */
+/* ---------- 工作区文件写入（可选） ---------- */
 
 async function writeWorkspaceFile(ctx, path, content) {
   try {
@@ -59,14 +56,13 @@ async function writeWorkspaceFile(ctx, path, content) {
   } catch { /* 工作区不可用时跳过 */ }
 }
 
-/* ---------- 左右对照表格生成 ---------- */
+/* ---------- 左右对照表格与摘要 ---------- */
 
 function escapeCell(text) {
   return text.replace(/\|/g, '\\|').replace(/\n/g, '<br>')
 }
 
 function buildSideBySideTable(a, b) {
-  // 按双换行分段；代码块（``` 围栏）作为整体保留
   const splitParagraphs = (text) => {
     if (!text) return []
     const blocks = []
@@ -82,18 +78,12 @@ function buildSideBySideTable(a, b) {
     if (current.length) blocks.push(current.join('\n'))
     return blocks.filter(b => b.trim())
   }
-
   const pa = splitParagraphs(a.text)
   const pb = splitParagraphs(b.text)
   const max = Math.max(pa.length, pb.length)
-
-  const lines = []
-  lines.push(`| ${a.label} | ${b.label} |`)
-  lines.push(`|---|---|`)
+  const lines = [`| ${a.label} | ${b.label} |`, `|---|---|`]
   for (let i = 0; i < max; i++) {
-    const left = pa[i] ? escapeCell(pa[i]) : ''
-    const right = pb[i] ? escapeCell(pb[i]) : ''
-    lines.push(`| ${left} | ${right} |`)
+    lines.push(`| ${pa[i] ? escapeCell(pa[i]) : ''} | ${pb[i] ? escapeCell(pb[i]) : ''} |`)
   }
   return lines.join('\n')
 }
@@ -105,8 +95,6 @@ function buildSummary(a, b, elapsedMs) {
   parts.push(`| 延迟 | ${a.latencyMs}ms | ${b.latencyMs}ms |`)
   parts.push(`| tokens | ${a.usage.input}+${a.usage.output} | ${b.usage.input}+${b.usage.output} |`)
   parts.push(`| 字数 | ${a.text.length} | ${b.text.length} |`)
-  if (a.error) parts.push(`| 错误 | ${escapeCell(a.error)} | - |`)
-  if (b.error) parts.push(`| 错误 | - | ${escapeCell(b.error)} |`)
   parts.push(``)
   parts.push(`总耗时: ${Math.round(elapsedMs)}ms`)
   return parts.join('\n')
@@ -124,26 +112,58 @@ export function apply(ctx, config) {
   const [modelA, modelB] = models
   const temperature = config.temperature ?? 0.7
   const maxTokens = config.maxTokens ?? 2048
+  const compareMode = config.compareMode ?? false
+
+  /* ---------- GUI 开关：system prompt 动态段落 ---------- */
+
+  let promptDisposer = null
+
+  const setCompareMode = (enabled) => {
+    if (promptDisposer) { promptDisposer(); promptDisposer = null }
+    if (!enabled) return
+    promptDisposer = ctx.systemPrompt.section({
+      name: 'llm-compare-auto',
+      order: 1100,
+      text: `# 对比模式已开启
+
+每次回答用户问题后，你**必须**调用 llm_compare 工具，把你刚才的回答内容作为 prompt 参数，让另一个模型（${modelB.label}）也回答同一问题。
+工具返回后，在回复末尾附上左右对照表格和摘要统计，让用户看到两个模型的差异。
+格式：先正常回答，然后附比对表格。`,
+      interpolate: false,
+    })
+  }
+
+  // 初始状态
+  setCompareMode(compareMode)
+
+  // volatile config 变更时即时切换（GUI 设置卡片保存后触发）
+  ctx.on('loader/volatile-update', () => {
+    const current = config.compareMode?.get?.() ?? config.compareMode ?? false
+    setCompareMode(current)
+  })
+
+  ctx.effect(() => () => { if (promptDisposer) promptDisposer() })
+
+  /* ---------- llm_compare 工具注册 ---------- */
 
   ctx.tools.register({
     name: 'llm_compare',
     description: [
       `Send the same prompt to two configured LLMs (${modelA.label} vs ${modelB.label}) in parallel.`,
-      'Results are returned as a side-by-side comparison table plus summary stats (latency, tokens, char count).',
-      'The agent should present the comparison directly in the reply—no need to open extra windows.',
-      'Optionally writes results to workspace files for sidebar split-pane viewing.',
-      'Use when the user wants to compare models, benchmark outputs, or evaluate different LLMs.',
+      'Results are returned as a side-by-side comparison table plus summary stats.',
+      'In compare mode, call this after each answer with your answer as the prompt to show how the other model would respond.',
+      'Use when the user wants to compare models, benchmark outputs, or when compare mode is enabled.',
     ].join(' '),
     parameters: {
       prompt: { type: 'string', required: true, description: 'The prompt to send to both models' },
-      writeFiles: { type: 'boolean', required: false, description: 'Also write results to llm-compare/*.md files in workspace for sidebar split-pane view (default: false)' },
+      writeFiles: { type: 'boolean', required: false, description: 'Also write results to workspace files for sidebar split-pane view (default: false)' },
     },
     output: {
       schema: {
         type: 'object',
         properties: {
-          comparisonTable: { type: 'string', description: 'Side-by-side markdown comparison table' },
-          summary: { type: 'string', description: 'Summary stats (latency, tokens, char count)' },
+          comparisonTable: { type: 'string' },
+          summary: { type: 'string' },
           modelA: { type: 'object', properties: { label: { type: 'string' }, text: { type: 'string' }, latencyMs: { type: 'number' }, tokens: { type: 'string' } } },
           modelB: { type: 'object', properties: { label: { type: 'string' }, text: { type: 'string' }, latencyMs: { type: 'number' }, tokens: { type: 'string' } } },
           elapsedMs: { type: 'number' },
@@ -151,23 +171,18 @@ export function apply(ctx, config) {
       },
       render: (_args, value) => {
         if (!value || !value.modelA) return [{ type: 'text', text: 'llm_compare: no result' }]
-        const parts = []
-        parts.push(`## LLM 比对结果\n`)
-        parts.push(value.comparisonTable ?? '')
-        parts.push(`\n### 摘要\n`)
-        parts.push(value.summary ?? '')
-        return [{ type: 'text', text: parts.join('\n') }]
+        return [{ type: 'text', text: `## LLM 比对结果\n\n${value.comparisonTable ?? ''}\n\n### 摘要\n${value.summary ?? ''}` }]
       },
     },
     presentCall: (args) => ({
       card: 'generic',
       title: `LLM 比对 · ${modelA.label} vs ${modelB.label}`,
-      content: args.prompt?.slice(0, 120) ?? '',
+      content: String(args.prompt ?? '').slice(0, 120),
     }),
     presentResult: (_args, { content }) => ({
       card: 'generic',
       title: `LLM 比对完成 · ${modelA.label} vs ${modelB.label}`,
-      content: content?.slice(0, 200) ?? '',
+      content: String(content ?? '').slice(0, 200),
     }),
     async execute(args, exec) {
       const start = Date.now()
@@ -187,7 +202,6 @@ export function apply(ctx, config) {
       const comparisonTable = buildSideBySideTable(a, b)
       const summary = buildSummary(a, b, elapsedMs)
 
-      // 可选：写入工作区文件供 Sidebar 分栏
       if (args.writeFiles) {
         await writeWorkspaceFile(ctx, `llm-compare/${a.label}.md`, `# ${a.label} (${a.model})\n${a.error ? `> **错误**: ${a.error}\n` : ''}\n${a.text}`)
         await writeWorkspaceFile(ctx, `llm-compare/${b.label}.md`, `# ${b.label} (${b.model})\n${b.error ? `> **错误**: ${b.error}\n` : ''}\n${b.text}`)
