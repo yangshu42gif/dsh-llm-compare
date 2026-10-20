@@ -1,0 +1,3 @@
+- insert:
+    - id: llm-compare
+      name: dsh-llm-compare

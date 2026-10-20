@@ -1,0 +1,18 @@
+{
+  "name": "dsh-llm-compare",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: send the same prompt to two LLMs in parallel and compare their outputs side by side.",
+  "type": "module",
+  "main": "index.js",
+  "files": ["index.js", "cordis.patch.yml", "README.md"],
+  "keywords": ["deepseek-harness", "dsh", "llm", "compare", "parallel"],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
