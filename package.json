@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-compare",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "DeepSeek Harness plugin: send the same prompt to two LLMs in parallel and compare their outputs side by side.",
   "type": "module",
   "main": "index.js",

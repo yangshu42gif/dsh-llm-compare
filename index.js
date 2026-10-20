@@ -1,8 +1,7 @@
-// dsh-llm-compare v0.4.0: 对话内开关对比模式——说「打开对比模式」即可切换。
-// 注册两个工具：
-//   compare_mode: 切换对比模式（on / off / status），切换后 system prompt 即时注入/移除
-//   llm_compare:  并行调用两个 LLM，结果以左右对照表格返回
-// 模型配置仍通过 profile 的 cordis.patch.yml 传入（YAML config）。
+// dsh-llm-compare v0.5.0: 对比模式为纯对话式开关——agent 直接确认，零工具调用。
+// 「打开对比模式」→ agent 纯文字回复「已开启」→ 后续回答自动调用 llm_compare 比对
+// 「关闭对比模式」→ agent 纯文字回复「已关闭」→ 停止比对
+// system prompt 常驻说明此行为，不需要额外工具切换状态。
 
 export const name = 'dsh-llm-compare'
 export const inject = ['tools', 'systemPrompt']
@@ -115,74 +114,21 @@ export function apply(ctx, config) {
   const temperature = config.temperature ?? 0.7
   const maxTokens = config.maxTokens ?? 2048
 
-  /* ---------- 对比模式状态 ---------- */
+  /* ---------- System prompt 常驻说明（对话式开关指令） ---------- */
 
-  let compareEnabled = false
-  let promptDisposer = null
+  ctx.systemPrompt.section({
+    name: 'llm-compare-guide',
+    order: 1100,
+    text: `# LLM 对比模式
 
-  const setCompareMode = (enabled) => {
-    compareEnabled = enabled
-    if (promptDisposer) { promptDisposer(); promptDisposer = null }
-    if (!enabled) return
-    promptDisposer = ctx.systemPrompt.section({
-      name: 'llm-compare-auto',
-      order: 1100,
-      text: `# 对比模式已开启
+你有一个 llm_compare 工具，可以并行调用两个 LLM（${modelA.label} 和 ${modelB.label}）并返回左右对照表格。
 
-每次回答用户问题后，你**必须**调用 llm_compare 工具，把你刚才的回答内容作为 prompt 参数，让两个模型也回答同一问题。
-工具返回后，在回复末尾附上左右对照表格和摘要统计，让用户看到两个模型的差异。
-格式：先正常回答，然后附比对表格。`,
-      interpolate: false,
-    })
-  }
-
-  ctx.effect(() => () => { if (promptDisposer) promptDisposer() })
-
-  /* ---------- compare_mode 工具（对话内开关） ---------- */
-
-  ctx.tools.register({
-    name: 'compare_mode',
-    description: `Toggle LLM compare mode on/off. When ON, every answer is automatically compared between ${modelA.label} and ${modelB.label}. Use action 'on' to enable, 'off' to disable, 'status' to check current state. Call this when the user says "打开对比模式", "开启对比", "比对模式", "关闭对比模式", "停止比对" etc.`,
-    parameters: {
-      action: { type: 'string', required: true, description: `'on' to enable compare mode, 'off' to disable, 'status' to check current state` },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          enabled: { type: 'boolean', description: 'Current compare mode state after this call' },
-          message: { type: 'string', description: 'Human-readable status message' },
-        },
-      },
-      render: (_args, value) => {
-        if (!value) return [{ type: 'text', text: 'compare_mode: no result' }]
-        return [{ type: 'text', text: value.message ?? `对比模式: ${value.enabled ? '已开启' : '已关闭'}` }]
-      },
-    },
-    presentCall: (args) => ({
-      card: 'generic',
-      title: `对比模式 · ${args.action === 'on' ? '开启' : args.action === 'off' ? '关闭' : '查询'}`,
-      content: `${modelA.label} vs ${modelB.label}`,
-    }),
-    presentResult: (_args, { content }) => ({
-      card: 'generic',
-      title: `对比模式 · ${content?.enabled ? '已开启' : '已关闭'}`,
-      content: content?.message ?? '',
-    }),
-    async execute(args, _exec) {
-      switch (args.action) {
-        case 'on':
-          setCompareMode(true)
-          return { enabled: true, message: `对比模式已开启：${modelA.label} vs ${modelB.label}。此后每次回答都会自动并行比对两个模型。` }
-        case 'off':
-          setCompareMode(false)
-          return { enabled: false, message: '对比模式已关闭。恢复正常单模型对话。' }
-        case 'status':
-          return { enabled: compareEnabled, message: `对比模式当前${compareEnabled ? '已开启' : '已关闭'}。` }
-        default:
-          return { enabled: compareEnabled, message: `未知操作 "${args.action}"，可用值：on / off / status。` }
-      }
-    },
+**对比模式开关（纯对话，不调用任何工具）：**
+- 当用户说「打开对比模式」「开启对比」「开始比对」等 → 直接回复「好的，对比模式已开启。此后每次回答我都会并行比对两个模型。」**不要调用任何工具**，纯文字确认即可。
+- 开启后，每次回答用户问题的末尾，调用 llm_compare 工具（把你刚才的回答作为 prompt 参数），在回复后附上比对表格。
+- 当用户说「关闭对比模式」「停止比对」「关闭对比」等 → 直接回复「对比模式已关闭。」**不要调用任何工具**，此后停止比对。
+- 用户问「对比模式是什么状态」→ 根据对话上下文判断当前是否在比对，纯文字回复。`,
+    interpolate: false,
   })
 
   /* ---------- llm_compare 工具（并行比对） ---------- */
@@ -192,8 +138,7 @@ export function apply(ctx, config) {
     description: [
       `Send the same prompt to two configured LLMs (${modelA.label} vs ${modelB.label}) in parallel.`,
       'Results are returned as a side-by-side comparison table plus summary stats.',
-      'In compare mode, call this after each answer with your answer as the prompt to show how the other model would respond.',
-      'Use when the user wants to compare models, benchmark outputs, or when compare mode is enabled.',
+      'When compare mode is active, call this after each answer with your answer as the prompt.',
     ].join(' '),
     parameters: {
       prompt: { type: 'string', required: true, description: 'The prompt to send to both models' },
