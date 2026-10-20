@@ -147,9 +147,13 @@ export function apply(ctx, config) {
       'When compare mode is active, call this after each answer with your answer as the prompt.',
     ].join(' '),
     parameters: {
-      prompt: { type: 'string', required: true, description: 'The prompt to send to both models' },
-      writeFiles: { type: 'boolean', required: false, description: 'Also write results to workspace files for sidebar split-pane view (default: false)' },
-    },
+      type: 'object',
+      properties: {
+    prompt: { type: 'string', description: 'The prompt to send to both models' },
+          writeFiles: { type: 'boolean', description: 'Also write results to workspace files for sidebar split-pane view (default: false)' },
+        },
+        required: ['prompt'],
+      },
     output: {
       schema: {
         type: 'object',
