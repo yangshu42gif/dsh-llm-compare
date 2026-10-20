@@ -1,9 +1,25 @@
-// dsh-llm-compare v0.3.0: GUI 开关对比模式——打开后每次对话自动并行比对两个 LLM。
+// dsh-llm-compare v0.3.1: GUI 开关对比模式——打开后每次对话自动并行比对两个 LLM。
 // 开关位于插件设置卡片（volatile config，即时生效），无需特定 query。
 // 关闭开关后恢复单模型正常对话。
 
+import Schema from '@deepseek-ai/schemastery'
+
 export const name = 'dsh-llm-compare'
 export const inject = ['tools', 'systemPrompt']
+
+/* ---------- Config Schema（DSH 据此渲染设置卡片） ---------- */
+
+export const Config = Schema.object({
+  models: Schema.array(Schema.object({
+    label: Schema.string().description('模型显示名称'),
+    baseUrl: Schema.string().description('OpenAI 兼容 API base URL'),
+    apiKey: Schema.string().role('secret').description('API 密钥'),
+    model: Schema.string().description('模型 ID'),
+  })).min(2).max(2).description('要比对的两个模型（左=第一个、右=第二个）'),
+  temperature: Schema.number().default(0.7).description('采样温度'),
+  maxTokens: Schema.number().default(2048).description('单模型最大生成 token'),
+  compareMode: Schema.boolean().default(false).volatile().description('对比模式开关：打开后每次回复自动并行比对两个模型'),
+})
 
 /* ---------- OpenAI 兼容 API 调用 ---------- */
 
